@@ -27,12 +27,12 @@ def extract_text_from_pdf(filename):
     return text
 
 def parse_quiz_content(text):
-    """Mətni analiz edib sual və cavabları ayırır."""
+    """Mətni analiz edib sual və cavabları ayırır (Çoxsətirli mətn dəstəyi ilə)."""
     questions = []
     lines = text.split('\n')
     
     current_question = None
-    # Sualın başlanğıcını tapan regex (Məsələn: "1. Sual mətni")
+    # Sualın başlanğıcını tapan regex (Rəqəm + nöqtə)
     question_start_regex = re.compile(r'^(\d+)\.\s*(.*)')
     
     # Cavabın düzgünlüyünü yoxlayan simvollar
@@ -47,47 +47,63 @@ def parse_quiz_content(text):
 
         q_match = question_start_regex.match(line)
 
+        # YENİ SUAL TAPILDI
         if q_match:
-            # Əgər yeni sual başlayırsa və köhnə sual varsa, onu siyahıya əlavə et
+            # Köhnə sualı yaddaşa ver
             if current_question:
-                # Yalnız 2-dən çox variantı olan sualları qəbul edirik
                 if len(current_question['options']) >= 2:
                     questions.append(current_question)
             
-            # Yeni sual obyektini yarat
+            # Yeni sual yarat
             current_question = {
                 'id': int(q_match.group(1)),
                 'text': q_match.group(2).strip(),
                 'options': []
             }
-        elif current_question:
-            # Əgər sual mətni boşdursa (bəzən sual nömrəsi və mətn ayrı sətirlərdə olur), mətni tamamla
-            if not current_question['text']:
-                current_question['text'] = line
-            else:
-                # Variantları emal et
-                is_correct = False
-                option_text = line
-                
-                # Düzgün cavab işarəsini yoxla (✔, √ və s.)
-                for marker in correct_markers:
-                    if option_text.startswith(marker) or marker in option_text:
-                        is_correct = True
-                        option_text = option_text.replace(marker, '')
-                        break
-                
-                # ƏLAVƏ TƏMİZLİK: Başlanğıcdakı digər simvolları (bullet •, tire -, ulduz *, nöqtə .) təmizlə
-                # Bu regex sətrin əvvəlindəki qeyri-hərf simvollarını silir
-                option_text = re.sub(r'^[\s\u2022\-\*\.]+', '', option_text).strip()
-                
-                # Sonda nöqtəli vergül və ya vergül varsa təmizlə
-                option_text = option_text.rstrip(';,')
-                
-                # Variant sadəcə rəqəmdirsə (səhifə nömrəsi və s.) ignor et
-                if re.match(r'^\d+\.$', option_text) or not option_text:
-                    continue
 
-                if option_text:
+        # CARİ SUALIN DAXİLİNDƏYİK
+        elif current_question:
+            # 1. Variant hələ yoxdursa, deməli bu sətir SUAL MƏTNİNİN davamıdır
+            if not current_question['options']:
+                # Əgər sətir variant kimi görünmürsə (A), B), -, • və s. yoxdursa)
+                # Burda sadə yoxlama edirik: Variantlar adətən böyük hərflə və ya xüsusi simvolla başlayır.
+                # Amma ən dəqiqi: əgər "correct_marker" yoxdursa və əvvəlki sətir sualdırsa, birləşdir.
+                
+                # Sualın davamı kimi qəbul edib yapışdırırıq
+                current_question['text'] += " " + line
+            
+            else:
+                # 2. Artıq variantlar başlayıb. Bu sətir ya YENİ variantdır, ya da KÖHNƏNİN davamıdır.
+                
+                # Bu sətirdə düzgün cavab işarəsi varmı?
+                has_marker = any(marker in line for marker in correct_markers)
+                
+                # Əgər işarə yoxdursa VƏ sətir kiçik hərflə başlayırsa -> BU DAVAMDIR
+                # (PDF-də cümlə qırılanda adətən kiçik hərflə davam edir)
+                is_continuation = not has_marker and (line[0].islower() or line[0] in [',', ';'])
+
+                if is_continuation and current_question['options']:
+                    # Əvvəlki variantın mətninə birləşdir
+                    current_question['options'][-1]['text'] += " " + line
+                else:
+                    # YENİ VARİANTDIR
+                    is_correct = False
+                    option_text = line
+                    
+                    for marker in correct_markers:
+                        if marker in option_text:
+                            is_correct = True
+                            option_text = option_text.replace(marker, '')
+                            break
+                    
+                    # Təmizlik işləri
+                    option_text = re.sub(r'^[\s\u2022\-\*\.]+', '', option_text).strip()
+                    option_text = option_text.rstrip(';,')
+                    
+                    # Boş və ya sadəcə rəqəm olan sətirləri at
+                    if re.match(r'^\d+\.$', option_text) or not option_text:
+                        continue
+
                     current_question['options'].append({
                         'text': option_text,
                         'isCorrect': is_correct
