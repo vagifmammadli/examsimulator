@@ -36,16 +36,10 @@ def parse_quiz_content(text):
     
     current_question = None
     
-    # YENİ REGEX (Çox daha geniş axtarış):
-    # ^\s* -> Sətrin əvvəlində boşluq ola bilər
-    # (\d+) -> Rəqəmi tut
-    # \s* -> Rəqəmdən sonra boşluq ola bilər (Məs: "1 .")
-    # [\.\)\-] -> Nöqtə, mötərizə və ya tire
-    # \s* -> Sonra yenə boşluq
-    # (.*) -> Mətn
+    # Regex: Sualın başlanğıcını tapan (Məs: "1.", "1)", "1 -")
     question_start_regex = re.compile(r'^\s*(\d+)\s*[\.\)\-]\s*(.*)')
     
-    # Düzgün cavab işarələri (Şəkildə görünən √ daxildir)
+    # Düzgün cavab işarələri 
     correct_markers = ['✔', '√', '+', '✓'] 
     
     # Variant başlanğıc simvolları (Təmizləmək üçün)
@@ -54,75 +48,54 @@ def parse_quiz_content(text):
     for line in lines:
         line = line.strip()
         
-        # Boş və ya lazımsız sətirləri keç
         if not line or '--- PAGE' in line or 'Fənn:' in line:
             continue
 
         q_match = question_start_regex.match(line)
 
-        # --- YENİ SUAL TAPILDI ---
+        # --- YENİ SUAL ---
         if q_match:
-            # Köhnə sualı yaddaşa at
             if current_question:
-                # Variant sayı az olsa belə, əgər sual mətni varsa əlavə et (bəzən parser variantları birləşdirir)
                 if len(current_question['options']) > 0:
                     questions.append(current_question)
             
-            # Yeni sual obyektini yarat
             current_question = {
                 'id': int(q_match.group(1)),
                 'text': q_match.group(2).strip(),
                 'options': []
             }
 
-        # --- SUALIN İÇİNDƏYİK ---
+        # --- SUALIN İÇİ ---
         elif current_question:
-            # Sətirdə düzgün cavab işarəsi varmı?
             is_correct = any(marker in line for marker in correct_markers)
-            
-            # Sətir variant oxşayır? (İşarə ilə başlayırsa və ya qısa simvolla)
-            # Şəkildəki '•' simvolunu xüsusi yoxlayırıq
             is_option_line = is_correct or any(line.startswith(b) for b in bullet_markers)
             
-            # Əgər hələ heç bir variant yoxdursa və sətir variant kimi görünmürsə -> SUALIN DAVAMIDIR
             if not current_question['options'] and not is_option_line:
-                 # Sadəcə böyük hərflə başlayan, amma variant olmayan cümlələri suala qatırıq
                  current_question['text'] += " " + line
-            
-            # Əks halda -> VARİANTDIR
             else:
-                # 1. Variantın əvvəlki cümlənin davamı olub-olmadığını yoxla
-                # Şərt: Yeni işarə yoxdur VƏ (kiçik hərflə başlayır VƏ YA vergüllə başlayır)
                 is_continuation = not is_option_line and (len(line) > 0 and (line[0].islower() or line[0] in [',', ';', ':']))
 
                 if is_continuation and current_question['options']:
                     current_question['options'][-1]['text'] += " " + line
                 else:
-                    # Yeni Variant əlavə et
                     option_text = line
-                    
-                    # Düzgün cavab işarəsini təmizlə
                     for marker in correct_markers:
                         option_text = option_text.replace(marker, '')
                     
-                    # Bullet (•) və digər zibilləri təmizlə
-                    # Bu regex sətrin əvvəlindəki bütün qeyri-hərf simvollarını silir
                     option_text = re.sub(r'^[\s•\-\*\)\.]+', '', option_text).strip()
                     
-                    # Yalnız boş olmayan variantları götür
                     if option_text and not re.match(r'^\d+\.$', option_text):
                         current_question['options'].append({
                             'text': option_text,
                             'isCorrect': is_correct
                         })
 
-    # Dövr bitəndə sonuncu sualı əlavə etməyi unutma
     if current_question and len(current_question['options']) > 0:
         questions.append(current_question)
         
     return questions
 
-# --- HTML TEMPLATE (Eyni qalır) ---
+# --- HTML TEMPLATE ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="az">
@@ -191,7 +164,7 @@ HTML_TEMPLATE = """
                 <div class="bg-white rounded-xl shadow-lg p-6 md:p-8 mb-6">
                     <div class="flex justify-between items-center mb-4 text-gray-500 text-sm">
                          <span>Sual <span id="currentQNum">1</span> / <span id="totalQNum">50</span></span>
-                         <span id="qIdBadge" class="bg-gray-100 px-2 py-0.5 rounded text-xs">ID: #0</span>
+                         <span id="qIdBadge" class="bg-gray-100 px-2 py-0.5 rounded text-xs font-mono font-bold text-gray-600">ID: #0</span>
                     </div>
                     <h2 id="questionText" class="text-xl md:text-2xl font-semibold text-gray-800 mb-6 leading-relaxed"></h2>
                     <div id="optionsContainer" class="space-y-3"></div>
@@ -236,7 +209,6 @@ HTML_TEMPLATE = """
                 const data = await response.json();
                 
                 if(data.error) {
-                    // Xəta olduqda daha ətraflı məlumat göstər
                     document.getElementById('debugInfo').innerText = data.debug || "";
                     document.getElementById('debugInfo').classList.remove('hidden');
                     throw new Error(data.error);
@@ -297,6 +269,8 @@ HTML_TEMPLATE = """
         function renderMap() { document.getElementById('questionMap').innerHTML = questions.map((_, i) => `<button id="mapBtn_${i}" onclick="renderQuestion(${i})" class="map-btn w-full aspect-square flex items-center justify-center border rounded text-sm font-medium hover:bg-gray-100 transition">${i + 1}</button>`).join(''); document.getElementById('mobileQuestionMap').innerHTML = document.getElementById('questionMap').innerHTML; }
         function updateMapHighlights() { questions.forEach((_, i) => { const btn = document.getElementById(`mapBtn_${i}`); const mobBtn = document.getElementById(`mobileQuestionMap`).children[i]; let cls = "map-btn w-full aspect-square flex items-center justify-center border rounded text-sm font-medium transition "; if (i === currentQuestionIndex) cls += "border-yellow-500 ring-2 ring-yellow-200 z-10 "; else cls += "border-gray-200 "; if (userAnswers[i] !== null) cls += "bg-blue-600 text-white border-blue-600 hover:bg-blue-700"; else cls += "bg-white text-gray-700 hover:bg-gray-50"; btn.className = cls; if(mobBtn) mobBtn.className = cls; }); }
         function startTimer() { startTime = Date.now(); timerInterval = setInterval(() => { const diff = Math.floor((Date.now() - startTime) / 1000); document.getElementById('timer').innerText = `${Math.floor(diff / 60).toString().padStart(2, '0')}:${(diff % 60).toString().padStart(2, '0')}`; }, 1000); }
+        
+        // --- ƏSAS DƏYİŞİKLİK BURADADIR ---
         function finishQuiz() {
             if(!confirm("İmtahanı tamamlamaq istədiyinizə əminsiniz?")) return;
             clearInterval(timerInterval);
@@ -308,14 +282,29 @@ HTML_TEMPLATE = """
                 const correctOpt = q.options.find(o => o.isCorrect);
                 let status = 'empty';
                 if(userAnsIdx !== null) { if(q.options[userAnsIdx].isCorrect) { correct++; status = 'correct'; } else { wrong++; status = 'wrong'; } } else { empty++; }
+                
                 const card = document.createElement('div');
                 card.className = `p-4 border rounded-lg ${status === 'correct' ? 'bg-green-50 border-green-200' : status === 'wrong' ? 'bg-red-50 border-red-200' : 'bg-gray-50'}`;
-                card.innerHTML = `<div class="flex gap-3"><div class="font-bold text-gray-500">${i+1}.</div><div class="flex-1"><p class="font-medium mb-2">${q.text}</p><div class="text-sm space-y-1">${status !== 'empty' ? `<div class="${status === 'correct' ? 'text-green-700 font-bold' : 'text-red-700 font-bold'}">Sizin cavab: ${q.options[userAnsIdx].text}</div>` : `<div class="text-gray-500 italic">Cavab verilməyib</div>`}<div class="text-green-700 bg-green-100 inline-block px-2 py-1 rounded text-xs font-bold mt-1">Doğru: ${correctOpt ? correctOpt.text : 'Təyin olunmayıb'}</div></div></div><div class="text-xl">${status === 'correct' ? '<i class="fas fa-check text-green-500"></i>' : status === 'wrong' ? '<i class="fas fa-times text-red-500"></i>' : '<i class="fas fa-minus text-gray-400"></i>'}</div></div>`;
+                
+                // Burada ID əlavə etdik:
+                card.innerHTML = `
+                    <div class="flex gap-3">
+                        <div class="flex flex-col items-center justify-start min-w-[3rem]">
+                            <span class="font-bold text-gray-600 text-xl">${i+1}.</span>
+                            <span class="text-[10px] text-gray-500 bg-gray-200 px-1.5 rounded mt-1 font-mono">ID:${q.original_id}</span>
+                        </div>
+                        <div class="flex-1">
+                            <p class="font-medium mb-2">${q.text}</p>
+                            <div class="text-sm space-y-1">${status !== 'empty' ? `<div class="${status === 'correct' ? 'text-green-700 font-bold' : 'text-red-700 font-bold'}">Sizin cavab: ${q.options[userAnsIdx].text}</div>` : `<div class="text-gray-500 italic">Cavab verilməyib</div>`}<div class="text-green-700 bg-green-100 inline-block px-2 py-1 rounded text-xs font-bold mt-1">Doğru: ${correctOpt ? correctOpt.text : 'Təyin olunmayıb'}</div></div>
+                        </div>
+                        <div class="text-xl">${status === 'correct' ? '<i class="fas fa-check text-green-500"></i>' : status === 'wrong' ? '<i class="fas fa-times text-red-500"></i>' : '<i class="fas fa-minus text-gray-400"></i>'}</div>
+                    </div>`;
                 reviewContainer.appendChild(card);
             });
             document.getElementById('finalScore').innerText = correct; document.getElementById('correctCount').innerText = correct; document.getElementById('wrongCount').innerText = wrong; document.getElementById('emptyCount').innerText = empty;
             document.getElementById('quizContent').classList.add('hidden'); document.getElementById('resultsScreen').classList.remove('hidden'); document.querySelector('aside').classList.add('hidden');
         }
+        
         function toggleMobileMap() { document.getElementById('mobileMapModal').classList.toggle('hidden'); }
         window.onload = loadQuestions;
     </script>
@@ -334,16 +323,15 @@ def get_questions():
     
     text = extract_text_from_pdf(PDF_FILENAME)
     if not text:
-        return jsonify({'error': "PDF-dən mətn oxuna bilmədi. Fayl zədəli və ya şəkil (scan) formatındadır."})
+        return jsonify({'error': "PDF-dən mətn oxuna bilmədi."})
 
     all_questions = parse_quiz_content(text)
     
     if not all_questions:
-        # Debug üçün ilk 500 simvolu göndər ki, problemi görək
         debug_snippet = text[:500] if text else "Mətn boşdur"
         return jsonify({
-            'error': "Suallar tapılmadı. Zəhmət olmasa PDF formatını yoxlayın.",
-            'debug': f"PDF-dən oxunan ilk hissə belə görünür:\n\n{debug_snippet}..."
+            'error': "Suallar tapılmadı. Format uyğunsuzluğu ola bilər.",
+            'debug': f"PDF-dən oxunan ilk hissə:\n{debug_snippet}..."
         })
 
     count = min(len(all_questions), 50)
