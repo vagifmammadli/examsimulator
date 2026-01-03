@@ -1,16 +1,35 @@
 import os
 import re
 import random
-from flask import Flask, render_template_string, jsonify
+import sqlite3
+import uuid
+from flask import Flask, render_template_string, jsonify, request, make_response
 import PyPDF2
 
 app = Flask(__name__)
 
-# PDF Faylının adı
+# --- KONFİQURASİYA ---
 PDF_FILENAME = 'mmsillabussu.pdf'
+DB_FILENAME = 'quiz.db'
 
+# --- VERİLƏNLƏR BAZASI (SQLite) ---
+def init_db():
+    """Bazanı və cədvəli yaradır"""
+    conn = sqlite3.connect(DB_FILENAME)
+    c = conn.cursor()
+    # machine_id - kompüterin unikal kodu (Cookie)
+    # username - istifadəçi adı
+    # score - ən yüksək toplanan bal
+    c.execute('''CREATE TABLE IF NOT EXISTS users
+                 (machine_id TEXT PRIMARY KEY, username TEXT, score INTEGER DEFAULT 0)''')
+    conn.commit()
+    conn.close()
+
+# Proqram işə düşəndə bazanı yoxla
+init_db()
+
+# --- PDF İŞLƏMLƏRİ (DƏYİŞMƏDİ) ---
 def extract_text_from_pdf(filename):
-    """PDF-dən mətni çıxarır."""
     text = ""
     try:
         with open(filename, 'rb') as file:
@@ -20,82 +39,47 @@ def extract_text_from_pdf(filename):
                 if page_text:
                     text += page_text + "\n"
     except Exception as e:
-        print(f"PDF oxuma xətası: {e}")
+        print(f"PDF xətası: {e}")
         return None
     return text
 
 def parse_quiz_content(text):
-    """
-    GÜCLƏNDİRİLMİŞ ANALİZ V3:
-    1. '1 .', '1)', '1-' və ya sadəcə '1.' formatlarını dəstəkləyir.
-    2. Variantların qarşısındakı '•' və '√' simvollarını təmizləyir.
-    3. Sualı tapmaq üçün daha çevik məntiq işlədir.
-    """
     questions = []
     lines = text.split('\n')
-    
     current_question = None
-    
-    # Regex: Sualın başlanğıcını tapan (Məs: "1.", "1)", "1 -")
     question_start_regex = re.compile(r'^\s*(\d+)\s*[\.\)\-]\s*(.*)')
-    
-    # Düzgün cavab işarələri 
     correct_markers = ['✔', '√', '+', '✓'] 
-    
-    # Variant başlanğıc simvolları (Təmizləmək üçün)
     bullet_markers = ['•', '●', '-', '*', ')']
 
     for line in lines:
         line = line.strip()
-        
-        if not line or '--- PAGE' in line or 'Fənn:' in line:
-            continue
+        if not line or '--- PAGE' in line or 'Fənn:' in line: continue
 
         q_match = question_start_regex.match(line)
-
-        # --- YENİ SUAL ---
         if q_match:
-            if current_question:
-                if len(current_question['options']) > 0:
-                    questions.append(current_question)
-            
-            current_question = {
-                'id': int(q_match.group(1)),
-                'text': q_match.group(2).strip(),
-                'options': []
-            }
-
-        # --- SUALIN İÇİ ---
+            if current_question and len(current_question['options']) > 0:
+                questions.append(current_question)
+            current_question = {'id': int(q_match.group(1)), 'text': q_match.group(2).strip(), 'options': []}
         elif current_question:
             is_correct = any(marker in line for marker in correct_markers)
             is_option_line = is_correct or any(line.startswith(b) for b in bullet_markers)
-            
             if not current_question['options'] and not is_option_line:
                  current_question['text'] += " " + line
             else:
                 is_continuation = not is_option_line and (len(line) > 0 and (line[0].islower() or line[0] in [',', ';', ':']))
-
                 if is_continuation and current_question['options']:
                     current_question['options'][-1]['text'] += " " + line
                 else:
                     option_text = line
-                    for marker in correct_markers:
-                        option_text = option_text.replace(marker, '')
-                    
+                    for marker in correct_markers: option_text = option_text.replace(marker, '')
                     option_text = re.sub(r'^[\s•\-\*\)\.]+', '', option_text).strip()
-                    
                     if option_text and not re.match(r'^\d+\.$', option_text):
-                        current_question['options'].append({
-                            'text': option_text,
-                            'isCorrect': is_correct
-                        })
-
+                        current_question['options'].append({'text': option_text, 'isCorrect': is_correct})
     if current_question and len(current_question['options']) > 0:
         questions.append(current_question)
-        
     return questions
 
-# --- HTML TEMPLATE ---
+# --- HTML ŞABLONU ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="az">
@@ -114,12 +98,26 @@ HTML_TEMPLATE = """
     </style>
 </head>
 <body class="flex flex-col h-screen overflow-hidden">
+
+    <div id="loginModal" class="fixed inset-0 bg-black bg-opacity-90 z-50 flex items-center justify-center {{ 'hidden' if user_exists else '' }}">
+        <div class="bg-white p-8 rounded-xl shadow-2xl max-w-md w-full text-center">
+            <i class="fas fa-user-shield text-5xl text-blue-900 mb-4"></i>
+            <h2 class="text-2xl font-bold text-gray-800 mb-2">Xoş Gəlmisiniz!</h2>
+            <p class="text-gray-600 mb-6">İmtahana başlamaq üçün adınızı və soyadınızı daxil edin.</p>
+            <input type="text" id="usernameInput" class="w-full p-3 border border-gray-300 rounded-lg mb-4 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Ad Soyad (Məs: Əli Əliyev)">
+            <button onclick="registerUser()" class="w-full bg-blue-600 text-white py-3 rounded-lg font-bold hover:bg-blue-700 transition">Başla</button>
+            <p class="text-xs text-red-500 mt-3">* Diqqət: Eyni kompüterdən yalnız bir dəfə qeydiyyat mümkündür.</p>
+        </div>
+    </div>
+
     <header class="bg-blue-900 text-white shadow-md z-10">
         <div class="container mx-auto px-4 py-3 flex justify-between items-center">
             <div class="flex items-center space-x-3">
                 <i class="fas fa-shield-alt text-2xl"></i>
-                <h1 class="text-xl font-bold hidden md:block">Mülki Müdafiə İmtahanı</h1>
-                <h1 class="text-xl font-bold md:hidden">MM İmtahan</h1>
+                <div class="leading-tight">
+                    <h1 class="text-xl font-bold">Mülki Müdafiə</h1>
+                    <div class="text-xs text-blue-200" id="headerUsername">{{ username if username else 'Qonaq' }}</div>
+                </div>
             </div>
             <div class="flex items-center space-x-4">
                 <div class="text-sm font-medium bg-blue-800 px-3 py-1 rounded-full border border-blue-700">
@@ -176,8 +174,9 @@ HTML_TEMPLATE = """
                 </div>
             </div>
 
-            <div id="resultsScreen" class="hidden max-w-4xl mx-auto">
-                <div class="bg-white rounded-xl shadow-lg p-8 mb-8 text-center border-t-4 border-blue-600">
+            <div id="resultsScreen" class="hidden max-w-4xl mx-auto space-y-8">
+                
+                <div class="bg-white rounded-xl shadow-lg p-8 text-center border-t-4 border-blue-600">
                     <h2 class="text-3xl font-bold text-gray-800 mb-2">İmtahan Nəticəsi</h2>
                     <div class="text-6xl font-bold text-blue-600 my-6"><span id="finalScore">0</span><span class="text-2xl text-gray-400">/50</span></div>
                     <div class="grid grid-cols-3 gap-4 max-w-lg mx-auto mb-8">
@@ -187,6 +186,25 @@ HTML_TEMPLATE = """
                     </div>
                     <button onclick="location.reload()" class="bg-blue-600 text-white px-8 py-3 rounded-lg font-bold shadow hover:bg-blue-700 transition">Yenidən Başla</button>
                 </div>
+
+                <div class="bg-white rounded-xl shadow-lg p-8 border-t-4 border-yellow-500">
+                    <h3 class="text-2xl font-bold text-gray-800 mb-4 flex items-center"><i class="fas fa-trophy text-yellow-500 mr-2"></i> Liderlər Lövhəsi (Top 10)</h3>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left">
+                            <thead class="bg-gray-100 text-gray-600 uppercase text-xs">
+                                <tr>
+                                    <th class="px-4 py-3">Rank</th>
+                                    <th class="px-4 py-3">İstifadəçi</th>
+                                    <th class="px-4 py-3 text-right">Ən Yüksək Bal</th>
+                                </tr>
+                            </thead>
+                            <tbody id="leaderboardTable" class="text-sm">
+                                <tr><td colspan="3" class="px-4 py-3 text-center text-gray-500">Yüklənir...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
                 <div class="bg-white rounded-xl shadow-lg p-8"><h3 class="text-xl font-bold text-gray-800 mb-6">Ətraflı Analiz</h3><div id="reviewContainer" class="space-y-6"></div></div>
             </div>
         </main>
@@ -203,7 +221,28 @@ HTML_TEMPLATE = """
         let startTime;
         let timerInterval;
 
+        async function registerUser() {
+            const username = document.getElementById('usernameInput').value.trim();
+            if(!username) { alert("Zəhmət olmasa adınızı daxil edin."); return; }
+
+            const res = await fetch('/api/register', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({username: username})
+            });
+            const data = await res.json();
+            
+            if(data.success) {
+                location.reload(); // Səhifəni yenilə ki, cookie aktiv olsun
+            } else {
+                alert("Xəta baş verdi: " + data.error);
+            }
+        }
+
         async function loadQuestions() {
+            // Əgər modal açıqdırsa, sualları yükləməyə tələsmə
+            if(!document.getElementById('loginModal').classList.contains('hidden')) return;
+
             try {
                 const response = await fetch('/api/questions');
                 const data = await response.json();
@@ -227,6 +266,41 @@ HTML_TEMPLATE = """
                 document.getElementById('errorModal').classList.remove('hidden');
                 document.getElementById('errorMessage').innerText = error.message;
             }
+        }
+
+        // --- Liderlər Cədvəlini Yüklə ---
+        async function loadLeaderboard() {
+            const res = await fetch('/api/leaderboard');
+            const users = await res.json();
+            const tbody = document.getElementById('leaderboardTable');
+            tbody.innerHTML = '';
+            
+            users.forEach((user, index) => {
+                let rankIcon = '';
+                if(index === 0) rankIcon = '🥇';
+                else if(index === 1) rankIcon = '🥈';
+                else if(index === 2) rankIcon = '🥉';
+                else rankIcon = `#${index + 1}`;
+
+                const tr = document.createElement('tr');
+                tr.className = "border-b border-gray-100 hover:bg-gray-50";
+                tr.innerHTML = `
+                    <td class="px-4 py-3 font-bold text-blue-900">${rankIcon}</td>
+                    <td class="px-4 py-3 font-medium text-gray-700">${user.username}</td>
+                    <td class="px-4 py-3 text-right font-bold text-gray-800">${user.score}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        // --- Nəticəni Bazaya Yaz ---
+        async function submitScore(score) {
+            await fetch('/api/submit_score', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({score: score})
+            });
+            loadLeaderboard();
         }
 
         function renderQuestion(index) {
@@ -270,7 +344,6 @@ HTML_TEMPLATE = """
         function updateMapHighlights() { questions.forEach((_, i) => { const btn = document.getElementById(`mapBtn_${i}`); const mobBtn = document.getElementById(`mobileQuestionMap`).children[i]; let cls = "map-btn w-full aspect-square flex items-center justify-center border rounded text-sm font-medium transition "; if (i === currentQuestionIndex) cls += "border-yellow-500 ring-2 ring-yellow-200 z-10 "; else cls += "border-gray-200 "; if (userAnswers[i] !== null) cls += "bg-blue-600 text-white border-blue-600 hover:bg-blue-700"; else cls += "bg-white text-gray-700 hover:bg-gray-50"; btn.className = cls; if(mobBtn) mobBtn.className = cls; }); }
         function startTimer() { startTime = Date.now(); timerInterval = setInterval(() => { const diff = Math.floor((Date.now() - startTime) / 1000); document.getElementById('timer').innerText = `${Math.floor(diff / 60).toString().padStart(2, '0')}:${(diff % 60).toString().padStart(2, '0')}`; }, 1000); }
         
-        // --- ƏSAS DƏYİŞİKLİK BURADADIR ---
         function finishQuiz() {
             if(!confirm("İmtahanı tamamlamaq istədiyinizə əminsiniz?")) return;
             clearInterval(timerInterval);
@@ -285,8 +358,6 @@ HTML_TEMPLATE = """
                 
                 const card = document.createElement('div');
                 card.className = `p-4 border rounded-lg ${status === 'correct' ? 'bg-green-50 border-green-200' : status === 'wrong' ? 'bg-red-50 border-red-200' : 'bg-gray-50'}`;
-                
-                // Burada ID əlavə etdik:
                 card.innerHTML = `
                     <div class="flex gap-3">
                         <div class="flex flex-col items-center justify-start min-w-[3rem]">
@@ -302,6 +373,10 @@ HTML_TEMPLATE = """
                 reviewContainer.appendChild(card);
             });
             document.getElementById('finalScore').innerText = correct; document.getElementById('correctCount').innerText = correct; document.getElementById('wrongCount').innerText = wrong; document.getElementById('emptyCount').innerText = empty;
+            
+            // YENİ: Balı bazaya göndər
+            submitScore(correct);
+
             document.getElementById('quizContent').classList.add('hidden'); document.getElementById('resultsScreen').classList.remove('hidden'); document.querySelector('aside').classList.add('hidden');
         }
         
@@ -312,12 +387,86 @@ HTML_TEMPLATE = """
 </html>
 """
 
+# --- ROUTES ---
+
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    # Cookie-ni yoxla
+    machine_id = request.cookies.get('quiz_user_id')
+    user_exists = False
+    username = None
+
+    if machine_id:
+        conn = sqlite3.connect(DB_FILENAME)
+        c = conn.cursor()
+        c.execute("SELECT username FROM users WHERE machine_id=?", (machine_id,))
+        result = c.fetchone()
+        conn.close()
+        
+        if result:
+            user_exists = True
+            username = result[0]
+
+    return render_template_string(HTML_TEMPLATE, user_exists=user_exists, username=username)
+
+@app.route('/api/register', methods=['POST'])
+def register():
+    data = request.json
+    username = data.get('username')
+    
+    # Cookie varsa ikinci dəfə qeydiyyata icazə vermə
+    if request.cookies.get('quiz_user_id'):
+        return jsonify({'success': True, 'message': 'Already registered'})
+
+    machine_id = str(uuid.uuid4())
+    
+    try:
+        conn = sqlite3.connect(DB_FILENAME)
+        c = conn.cursor()
+        c.execute("INSERT INTO users (machine_id, username, score) VALUES (?, ?, 0)", (machine_id, username))
+        conn.commit()
+        conn.close()
+        
+        resp = make_response(jsonify({'success': True}))
+        # Cookie-ni 10 illik qoyuruq ki, silinməsin
+        resp.set_cookie('quiz_user_id', machine_id, max_age=60*60*24*365*10)
+        return resp
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/submit_score', methods=['POST'])
+def save_score():
+    machine_id = request.cookies.get('quiz_user_id')
+    if not machine_id:
+        return jsonify({'error': 'No user'})
+    
+    new_score = request.json.get('score', 0)
+    
+    conn = sqlite3.connect(DB_FILENAME)
+    c = conn.cursor()
+    # Yalnız əgər yeni bal köhnədən çoxdursa yenilə
+    c.execute("SELECT score FROM users WHERE machine_id=?", (machine_id,))
+    current = c.fetchone()
+    
+    if current and new_score > current[0]:
+        c.execute("UPDATE users SET score=? WHERE machine_id=?", (new_score, machine_id))
+        conn.commit()
+    
+    conn.close()
+    return jsonify({'success': True})
+
+@app.route('/api/leaderboard')
+def get_leaderboard():
+    conn = sqlite3.connect(DB_FILENAME)
+    c = conn.cursor()
+    # Ən çox bal yığan ilk 10 nəfəri gətir
+    c.execute("SELECT username, score FROM users ORDER BY score DESC LIMIT 10")
+    users = [{'username': row[0], 'score': row[1]} for row in c.fetchall()]
+    conn.close()
+    return jsonify(users)
 
 @app.route('/api/questions')
-def get_questions():
+def get_questions_api():
     if not os.path.exists(PDF_FILENAME):
         return jsonify({'error': f"'{PDF_FILENAME}' faylı tapılmadı."})
     
@@ -330,7 +479,7 @@ def get_questions():
     if not all_questions:
         debug_snippet = text[:500] if text else "Mətn boşdur"
         return jsonify({
-            'error': "Suallar tapılmadı. Format uyğunsuzluğu ola bilər.",
+            'error': "Suallar tapılmadı.",
             'debug': f"PDF-dən oxunan ilk hissə:\n{debug_snippet}..."
         })
 
