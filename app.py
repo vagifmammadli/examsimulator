@@ -12,23 +12,19 @@ app = Flask(__name__)
 PDF_FILENAME = 'mmsillabussu.pdf'
 DB_FILENAME = 'quiz.db'
 
-# --- VERİLƏNLƏR BAZASI (SQLite) ---
+# --- VERİLƏNLƏR BAZASI ---
 def init_db():
-    """Bazanı və cədvəli yaradır"""
     conn = sqlite3.connect(DB_FILENAME)
     c = conn.cursor()
-    # machine_id - kompüterin unikal kodu (Cookie)
-    # username - istifadəçi adı
-    # score - ən yüksək toplanan bal
+    # username sütunu artıq UNIQUE (unikal) olacaq
     c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (machine_id TEXT PRIMARY KEY, username TEXT, score INTEGER DEFAULT 0)''')
+                 (machine_id TEXT PRIMARY KEY, username TEXT UNIQUE, score INTEGER DEFAULT 0)''')
     conn.commit()
     conn.close()
 
-# Proqram işə düşəndə bazanı yoxla
 init_db()
 
-# --- PDF İŞLƏMLƏRİ (DƏYİŞMƏDİ) ---
+# --- PDF PARSER (Dəyişməyib) ---
 def extract_text_from_pdf(filename):
     text = ""
     try:
@@ -36,11 +32,8 @@ def extract_text_from_pdf(filename):
             reader = PyPDF2.PdfReader(file)
             for page in reader.pages:
                 page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
-    except Exception as e:
-        print(f"PDF xətası: {e}")
-        return None
+                if page_text: text += page_text + "\n"
+    except Exception as e: return None
     return text
 
 def parse_quiz_content(text):
@@ -54,7 +47,6 @@ def parse_quiz_content(text):
     for line in lines:
         line = line.strip()
         if not line or '--- PAGE' in line or 'Fənn:' in line: continue
-
         q_match = question_start_regex.match(line)
         if q_match:
             if current_question and len(current_question['options']) > 0:
@@ -79,7 +71,7 @@ def parse_quiz_content(text):
         questions.append(current_question)
     return questions
 
-# --- HTML ŞABLONU ---
+# --- HTML ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="az">
@@ -103,10 +95,13 @@ HTML_TEMPLATE = """
         <div class="bg-white p-8 rounded-xl shadow-2xl max-w-md w-full text-center">
             <i class="fas fa-user-shield text-5xl text-blue-900 mb-4"></i>
             <h2 class="text-2xl font-bold text-gray-800 mb-2">Xoş Gəlmisiniz!</h2>
-            <p class="text-gray-600 mb-6">İmtahana başlamaq üçün adınızı və soyadınızı daxil edin.</p>
-            <input type="text" id="usernameInput" class="w-full p-3 border border-gray-300 rounded-lg mb-4 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Ad Soyad (Məs: Əli Əliyev)">
+            <p class="text-gray-600 mb-6">İmtahana başlamaq üçün adınızı daxil edin.</p>
+            
+            <input type="text" id="usernameInput" class="w-full p-3 border border-gray-300 rounded-lg mb-4 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Ad Soyad (Unikal olmalıdır)">
+            
+            <div id="loginError" class="text-red-600 text-sm font-bold mb-3 hidden"></div>
+            
             <button onclick="registerUser()" class="w-full bg-blue-600 text-white py-3 rounded-lg font-bold hover:bg-blue-700 transition">Başla</button>
-            <p class="text-xs text-red-500 mt-3">* Diqqət: Eyni kompüterdən yalnız bir dəfə qeydiyyat mümkündür.</p>
         </div>
     </div>
 
@@ -175,7 +170,6 @@ HTML_TEMPLATE = """
             </div>
 
             <div id="resultsScreen" class="hidden max-w-4xl mx-auto space-y-8">
-                
                 <div class="bg-white rounded-xl shadow-lg p-8 text-center border-t-4 border-blue-600">
                     <h2 class="text-3xl font-bold text-gray-800 mb-2">İmtahan Nəticəsi</h2>
                     <div class="text-6xl font-bold text-blue-600 my-6"><span id="finalScore">0</span><span class="text-2xl text-gray-400">/50</span></div>
@@ -198,13 +192,10 @@ HTML_TEMPLATE = """
                                     <th class="px-4 py-3 text-right">Ən Yüksək Bal</th>
                                 </tr>
                             </thead>
-                            <tbody id="leaderboardTable" class="text-sm">
-                                <tr><td colspan="3" class="px-4 py-3 text-center text-gray-500">Yüklənir...</td></tr>
-                            </tbody>
+                            <tbody id="leaderboardTable" class="text-sm"><tr><td colspan="3" class="px-4 py-3 text-center text-gray-500">Yüklənir...</td></tr></tbody>
                         </table>
                     </div>
                 </div>
-
                 <div class="bg-white rounded-xl shadow-lg p-8"><h3 class="text-xl font-bold text-gray-800 mb-6">Ətraflı Analiz</h3><div id="reviewContainer" class="space-y-6"></div></div>
             </div>
         </main>
@@ -222,25 +213,39 @@ HTML_TEMPLATE = """
         let timerInterval;
 
         async function registerUser() {
-            const username = document.getElementById('usernameInput').value.trim();
-            if(!username) { alert("Zəhmət olmasa adınızı daxil edin."); return; }
-
-            const res = await fetch('/api/register', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({username: username})
-            });
-            const data = await res.json();
+            const usernameInput = document.getElementById('usernameInput');
+            const errorDiv = document.getElementById('loginError');
+            const username = usernameInput.value.trim();
             
-            if(data.success) {
-                location.reload(); // Səhifəni yenilə ki, cookie aktiv olsun
-            } else {
-                alert("Xəta baş verdi: " + data.error);
+            errorDiv.classList.add('hidden');
+            if(!username) { 
+                errorDiv.innerText = "Zəhmət olmasa adınızı daxil edin.";
+                errorDiv.classList.remove('hidden');
+                return; 
+            }
+
+            try {
+                const res = await fetch('/api/register', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({username: username})
+                });
+                const data = await res.json();
+                
+                if(data.success) {
+                    location.reload(); 
+                } else {
+                    // Xəta mesajını göstər (Məs: Ad tutulub)
+                    errorDiv.innerText = data.error || "Xəta baş verdi.";
+                    errorDiv.classList.remove('hidden');
+                }
+            } catch (e) {
+                errorDiv.innerText = "Serverlə əlaqə xətası.";
+                errorDiv.classList.remove('hidden');
             }
         }
 
         async function loadQuestions() {
-            // Əgər modal açıqdırsa, sualları yükləməyə tələsmə
             if(!document.getElementById('loginModal').classList.contains('hidden')) return;
 
             try {
@@ -268,7 +273,6 @@ HTML_TEMPLATE = """
             }
         }
 
-        // --- Liderlər Cədvəlini Yüklə ---
         async function loadLeaderboard() {
             const res = await fetch('/api/leaderboard');
             const users = await res.json();
@@ -284,16 +288,11 @@ HTML_TEMPLATE = """
 
                 const tr = document.createElement('tr');
                 tr.className = "border-b border-gray-100 hover:bg-gray-50";
-                tr.innerHTML = `
-                    <td class="px-4 py-3 font-bold text-blue-900">${rankIcon}</td>
-                    <td class="px-4 py-3 font-medium text-gray-700">${user.username}</td>
-                    <td class="px-4 py-3 text-right font-bold text-gray-800">${user.score}</td>
-                `;
+                tr.innerHTML = `<td class="px-4 py-3 font-bold text-blue-900">${rankIcon}</td><td class="px-4 py-3 font-medium text-gray-700">${user.username}</td><td class="px-4 py-3 text-right font-bold text-gray-800">${user.score}</td>`;
                 tbody.appendChild(tr);
             });
         }
 
-        // --- Nəticəni Bazaya Yaz ---
         async function submitScore(score) {
             await fetch('/api/submit_score', {
                 method: 'POST',
@@ -358,25 +357,11 @@ HTML_TEMPLATE = """
                 
                 const card = document.createElement('div');
                 card.className = `p-4 border rounded-lg ${status === 'correct' ? 'bg-green-50 border-green-200' : status === 'wrong' ? 'bg-red-50 border-red-200' : 'bg-gray-50'}`;
-                card.innerHTML = `
-                    <div class="flex gap-3">
-                        <div class="flex flex-col items-center justify-start min-w-[3rem]">
-                            <span class="font-bold text-gray-600 text-xl">${i+1}.</span>
-                            <span class="text-[10px] text-gray-500 bg-gray-200 px-1.5 rounded mt-1 font-mono">ID:${q.original_id}</span>
-                        </div>
-                        <div class="flex-1">
-                            <p class="font-medium mb-2">${q.text}</p>
-                            <div class="text-sm space-y-1">${status !== 'empty' ? `<div class="${status === 'correct' ? 'text-green-700 font-bold' : 'text-red-700 font-bold'}">Sizin cavab: ${q.options[userAnsIdx].text}</div>` : `<div class="text-gray-500 italic">Cavab verilməyib</div>`}<div class="text-green-700 bg-green-100 inline-block px-2 py-1 rounded text-xs font-bold mt-1">Doğru: ${correctOpt ? correctOpt.text : 'Təyin olunmayıb'}</div></div>
-                        </div>
-                        <div class="text-xl">${status === 'correct' ? '<i class="fas fa-check text-green-500"></i>' : status === 'wrong' ? '<i class="fas fa-times text-red-500"></i>' : '<i class="fas fa-minus text-gray-400"></i>'}</div>
-                    </div>`;
+                card.innerHTML = `<div class="flex gap-3"><div class="flex flex-col items-center justify-start min-w-[3rem]"><span class="font-bold text-gray-600 text-xl">${i+1}.</span><span class="text-[10px] text-gray-500 bg-gray-200 px-1.5 rounded mt-1 font-mono">ID:${q.original_id}</span></div><div class="flex-1"><p class="font-medium mb-2">${q.text}</p><div class="text-sm space-y-1">${status !== 'empty' ? `<div class="${status === 'correct' ? 'text-green-700 font-bold' : 'text-red-700 font-bold'}">Sizin cavab: ${q.options[userAnsIdx].text}</div>` : `<div class="text-gray-500 italic">Cavab verilməyib</div>`}<div class="text-green-700 bg-green-100 inline-block px-2 py-1 rounded text-xs font-bold mt-1">Doğru: ${correctOpt ? correctOpt.text : 'Təyin olunmayıb'}</div></div></div><div class="text-xl">${status === 'correct' ? '<i class="fas fa-check text-green-500"></i>' : status === 'wrong' ? '<i class="fas fa-times text-red-500"></i>' : '<i class="fas fa-minus text-gray-400"></i>'}</div></div>`;
                 reviewContainer.appendChild(card);
             });
             document.getElementById('finalScore').innerText = correct; document.getElementById('correctCount').innerText = correct; document.getElementById('wrongCount').innerText = wrong; document.getElementById('emptyCount').innerText = empty;
-            
-            // YENİ: Balı bazaya göndər
             submitScore(correct);
-
             document.getElementById('quizContent').classList.add('hidden'); document.getElementById('resultsScreen').classList.remove('hidden'); document.querySelector('aside').classList.add('hidden');
         }
         
@@ -391,7 +376,6 @@ HTML_TEMPLATE = """
 
 @app.route('/')
 def index():
-    # Cookie-ni yoxla
     machine_id = request.cookies.get('quiz_user_id')
     user_exists = False
     username = None
@@ -403,9 +387,14 @@ def index():
         result = c.fetchone()
         conn.close()
         
+        # DÜZƏLİŞ: Əgər cookie var, amma baza boşdursa (user silinib),
+        # 'user_exists = False' qoyuruq ki, yenidən qeydiyyat pəncərəsi açılsın.
         if result:
             user_exists = True
             username = result[0]
+        else:
+            # Cookie var, amma user yoxdur (Zombie Cookie).
+            user_exists = False
 
     return render_template_string(HTML_TEMPLATE, user_exists=user_exists, username=username)
 
@@ -414,44 +403,49 @@ def register():
     data = request.json
     username = data.get('username')
     
-    # Cookie varsa ikinci dəfə qeydiyyata icazə vermə
-    if request.cookies.get('quiz_user_id'):
-        return jsonify({'success': True, 'message': 'Already registered'})
+    conn = sqlite3.connect(DB_FILENAME)
+    c = conn.cursor()
+    
+    # DÜZƏLİŞ: İlk öncə ADIN tutulub-tutulmadığını yoxlayırıq
+    c.execute("SELECT machine_id FROM users WHERE username=?", (username,))
+    existing_user = c.fetchone()
+    
+    if existing_user:
+        conn.close()
+        return jsonify({'success': False, 'error': 'Bu ad artıq istifadə olunur. Zəhmət olmasa başqa ad seçin.'})
 
-    machine_id = str(uuid.uuid4())
+    # DÜZƏLİŞ: Əgər köhnə cookie varsa da, onu yeniləyəcəyik (Loop probleminin həlli)
+    # Yeni unikal ID yaradılır
+    new_machine_id = str(uuid.uuid4())
     
     try:
-        conn = sqlite3.connect(DB_FILENAME)
-        c = conn.cursor()
-        c.execute("INSERT INTO users (machine_id, username, score) VALUES (?, ?, 0)", (machine_id, username))
+        c.execute("INSERT INTO users (machine_id, username, score) VALUES (?, ?, 0)", (new_machine_id, username))
         conn.commit()
         conn.close()
         
         resp = make_response(jsonify({'success': True}))
-        # Cookie-ni 10 illik qoyuruq ki, silinməsin
-        resp.set_cookie('quiz_user_id', machine_id, max_age=60*60*24*365*10)
+        # Cookie yenilənir
+        resp.set_cookie('quiz_user_id', new_machine_id, max_age=60*60*24*365*10)
         return resp
     except Exception as e:
+        conn.close()
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/api/submit_score', methods=['POST'])
 def save_score():
     machine_id = request.cookies.get('quiz_user_id')
-    if not machine_id:
-        return jsonify({'error': 'No user'})
+    if not machine_id: return jsonify({'error': 'No user'})
     
     new_score = request.json.get('score', 0)
     
     conn = sqlite3.connect(DB_FILENAME)
     c = conn.cursor()
-    # Yalnız əgər yeni bal köhnədən çoxdursa yenilə
     c.execute("SELECT score FROM users WHERE machine_id=?", (machine_id,))
     current = c.fetchone()
     
     if current and new_score > current[0]:
         c.execute("UPDATE users SET score=? WHERE machine_id=?", (new_score, machine_id))
         conn.commit()
-    
     conn.close()
     return jsonify({'success': True})
 
@@ -459,7 +453,6 @@ def save_score():
 def get_leaderboard():
     conn = sqlite3.connect(DB_FILENAME)
     c = conn.cursor()
-    # Ən çox bal yığan ilk 10 nəfəri gətir
     c.execute("SELECT username, score FROM users ORDER BY score DESC LIMIT 10")
     users = [{'username': row[0], 'score': row[1]} for row in c.fetchall()]
     conn.close()
@@ -478,14 +471,10 @@ def get_questions_api():
     
     if not all_questions:
         debug_snippet = text[:500] if text else "Mətn boşdur"
-        return jsonify({
-            'error': "Suallar tapılmadı.",
-            'debug': f"PDF-dən oxunan ilk hissə:\n{debug_snippet}..."
-        })
+        return jsonify({'error': "Suallar tapılmadı.", 'debug': f"PDF-dən oxunan ilk hissə:\n{debug_snippet}..."})
 
     count = min(len(all_questions), 50)
     selected_questions = random.sample(all_questions, count)
-    
     for q in selected_questions:
         q['original_id'] = q['id']
         random.shuffle(q['options'])
